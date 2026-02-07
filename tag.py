@@ -8,18 +8,26 @@ from email.mime.text import MIMEText
 import json
 from openai import OpenAI
 import os
-import tiktoken  # Add this to imports at top
-import re  # Add this to imports at top
-from datetime import datetime, timedelta  # Update this import line
-import time  # Add to imports at top
+import tiktoken
+import re
+from datetime import datetime, timedelta
+import time
+from bs4 import BeautifulSoup
 
-# Load secrets from secrets.json
+# Load secrets from environment variables (Railway/production) or secrets.json (local)
 def load_secrets():
+    # Try environment variable first (for Railway/production)
+    openai_key = os.environ.get('OPENAI_API_KEY')
+
+    if openai_key:
+        return {'openai_api_key': openai_key}
+
+    # Fallback to secrets.json for local development
     try:
         with open('secrets.json', 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        raise FileNotFoundError("secrets.json file not found. Please create it with your OpenAI API key.")
+        raise FileNotFoundError("Neither OPENAI_API_KEY environment variable nor secrets.json file found.")
     except json.JSONDecodeError:
         raise ValueError("secrets.json is not properly formatted JSON.")
 
@@ -31,7 +39,10 @@ client = OpenAI(api_key=secrets['openai_api_key'])
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.modify']
 
 # Constants
-CLASSIFICATION_LABELS = ["ATTN", "FK-U", "MARKETING", "TAKE-A-LOOK", "HMMMM"]
+CLASSIFICATION_LABELS = ["ATTN", "FK-U", "MARKETING", "TAKE-A-LOOK", "HMMMM", "ATTN-COFOUNDER"]
+
+# Maximum character limit for email content
+MAX_CONTENT_LENGTH = 500  # Aggressive truncation
 
 def load_prompt_template():
     """Loads the prompt template from prompt.txt"""
@@ -42,30 +53,28 @@ def load_prompt_template():
         raise FileNotFoundError("prompt.txt file not found. Please create it with your classification instructions.")
 
 def classify_email(sender, subject, content, email_date):
-    """Classifies email using GPT-4."""
+    """Classifies email using GPT-4"""
+    prompt_template = load_prompt_template()
+    prompt = prompt_template.format(
+        sender=sender,
+        subject=subject,
+        content=content,
+        email_date=email_date
+    )
+    
     try:
-        # Load the prompt template
-        prompt_template = load_prompt_template()
-        
-        # Format the prompt with the email details
-        prompt = prompt_template.format(
-            sender=sender,
-            subject=subject,
-            content=content,
-            email_date=email_date
-        )
-        
         response = client.chat.completions.create(
-            model="gpt-4",
-            response_format={ "type": "json_object" },
+            model="gpt-5-2025-08-07",
             messages=[
-                {"role": "system", "content": "You are an email classifier that categorizes emails."},
+                {"role": "system", "content": "You are an email classifier that categorizes emails. Always respond in valid JSON format with 'classification' and 'reason' fields."},
                 {"role": "user", "content": prompt}
             ]
         )
+        # Parse the response text as JSON
         return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError as e:
+        return {"classification": "ERROR", "reason": f"Failed to parse GPT response as JSON: {str(e)}"}
     except Exception as e:
-        print(f"Debug - Error details: {str(e)}")
         return {"classification": "ERROR", "reason": f"Failed to classify: {str(e)}"}
 
 def get_gmail_service():
@@ -97,69 +106,212 @@ def count_tokens(text, model="gpt-4"):
     encoding = tiktoken.encoding_for_model(model)
     return len(encoding.encode(text))
 
-def clean_email_content(text):
-    """Cleans email content while preserving quotes and important formatting."""
-    
-    # Remove style and script tags and their contents
-    text = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', text)
-    text = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', text)
-    
-    # Remove image tags but keep alt text
-    text = re.sub(r'<img[^>]*alt="([^"]*)"[^>]*>', r'\1', text)
-    text = re.sub(r'<img[^>]*>', '', text)
-    
-    # Remove common marketing/footer patterns while preserving quote structure
-    patterns_to_remove = [
-        r'Copyright ©.*?(?=\n|$)',
-        r'You are receiving this email because.*?(?=\n|$)',
-        r'To connect with us.*?(?=\n|$)',
-        r'Our mailing address.*?(?=\n|$)',
-        r'Unsubscribe.*?(?=\n|$)',
-        r'Add .* to your address book.*?(?=\n|$)',
+def get_email_body(payload):
+    """Extracts email body from Gmail API payload, preferring plain text over HTML."""
+    plain_text = None
+    html_text = None
+
+    def extract_from_parts(parts):
+        """Recursively extract text from MIME parts."""
+        nonlocal plain_text, html_text
+
+        for part in parts:
+            mime_type = part.get('mimeType', '')
+
+            # If this part has subparts, recurse
+            if 'parts' in part:
+                extract_from_parts(part['parts'])
+
+            # Check if this is a text part
+            elif mime_type == 'text/plain':
+                data = part['body'].get('data', '')
+                if data:
+                    plain_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+
+            elif mime_type == 'text/html':
+                data = part['body'].get('data', '')
+                if data:
+                    html_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+
+    # Check if message has parts (multipart)
+    if 'parts' in payload:
+        extract_from_parts(payload['parts'])
+    else:
+        # Single part message
+        mime_type = payload.get('mimeType', '')
+        data = payload['body'].get('data', '')
+
+        if data:
+            decoded = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+            if mime_type == 'text/plain':
+                plain_text = decoded
+            elif mime_type == 'text/html':
+                html_text = decoded
+            else:
+                # Unknown type, try to decode anyway
+                plain_text = decoded
+
+    # Prefer plain text, fall back to HTML
+    if plain_text:
+        return clean_email_content(plain_text, is_html=False)
+    elif html_text:
+        return clean_email_content(html_text, is_html=True)
+    else:
+        return 'No content'
+
+def extract_text_from_html(html):
+    """Converts HTML to clean plain text using BeautifulSoup."""
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Remove script, style, and other non-content tags
+    for tag in soup(['script', 'style', 'meta', 'link', 'noscript', 'head', 'header', 'footer', 'nav', 'aside']):
+        tag.decompose()
+
+    # Get text
+    text = soup.get_text(separator=' ')
+    return text
+
+
+def clean_email_content(text, is_html=False):
+    """EXTREME cleaning - maximizes token savings by being ultra-aggressive."""
+
+    # If HTML, convert to text first
+    if is_html or '<html' in text.lower() or '<body' in text.lower():
+        text = extract_text_from_html(text)
+
+    # Remove ALL URLs (more aggressive pattern)
+    text = re.sub(r'https?://[^\s]+', '', text)
+    text = re.sub(r'www\.[^\s]+', '', text)
+    text = re.sub(r'\S+\.(com|org|net|io|co|ai|dev)[^\s]*', '', text, flags=re.IGNORECASE)
+
+    # Remove email addresses
+    text = re.sub(r'\S+@\S+\.\S+', '', text)
+
+    # Remove phone numbers
+    text = re.sub(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', '', text)
+
+    # Remove all invisible characters
+    text = re.sub(r'[\u200B-\u200D\uFEFF\u00A0\u2060\u180E\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u2800\u3164]', '', text)
+
+    # Remove standalone punctuation and brackets
+    text = re.sub(r'\(\s*\)', '', text)
+    text = re.sub(r'\[\s*\]', '', text)
+    text = re.sub(r'\{\s*\}', '', text)
+
+    # Aggressively remove common marketing phrases and patterns
+    marketing_patterns = [
+        r'View in browser.*',
+        r'View this email.*',
+        r'View online.*',
+        r'Read online.*',
+        r'Open in browser.*',
+        r'View image:.*',
+        r'Follow image link:.*',
+        r'Caption:.*',
+        r'Click here.*',
+        r'Learn more.*',
+        r'Read more.*',
+        r'Shop now.*',
+        r'Buy now.*',
+        r'Order now.*',
+        r'Subscribe.*',
+        r'Unsubscribe.*',
+        r'Update your preferences.*',
+        r'Manage your subscription.*',
+        r'Copyright ©.*',
+        r'All rights reserved.*',
+        r'You are receiving this.*',
+        r'This email was sent.*',
+        r'Our mailing address.*',
+        r'No longer want to receive.*',
+        r'Too many emails\?.*',
+        r'Forward to a friend.*',
+        r'Share on.*',
+        r'Follow us on.*',
+        r'Connect with us.*',
+        r'Terms and conditions.*',
+        r'Privacy policy.*',
+        r'Terms of service.*',
+        r'Help center.*',
+        r'Customer support.*',
+        r'Contact us.*',
+        r'Add to calendar.*',
+        r'Download our app.*',
+        r'Get the app.*',
+        r'Available on.*',
+        r'App Store.*',
+        r'Google Play.*',
+        r'Sent from my.*',
+        r'Get Outlook for.*',
+        r'To view this.*',
+        r'If you cannot see.*',
     ]
-    
-    for pattern in patterns_to_remove:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-    
-    # Remove HTML attributes that don't affect content
-    text = re.sub(r'style="[^"]*"', '', text)
-    text = re.sub(r'class="[^"]*"', '', text)
-    text = re.sub(r'width="[^"]*"', '', text)
-    text = re.sub(r'height="[^"]*"', '', text)
-    text = re.sub(r'align="[^"]*"', '', text)
-    
-    # Remove URLs and base64 images while preserving link text
-    text = re.sub(r'<a[^>]*href="[^"]*"[^>]*>([^<]+)</a>', r'\1', text)
-    text = re.sub(r'data:image/[^;]+;base64,[a-zA-Z0-9+/]+={0,2}', '', text)
-    
-    # Remove remaining HTML tags but preserve their content
-    text = re.sub(r'<[^>]+>', ' ', text)
-    
-    # Clean up whitespace while preserving email quote structure
-    text = re.sub(r' +', ' ', text)  # Multiple spaces to single space
-    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Multiple blank lines to double line
-    
-    # Preserve common quote markers
-    text = re.sub(r'^\s*>+\s*', '> ', text, flags=re.MULTILINE)  # Standardize quote markers
-    
-    # Better quote handling - collapse multiple '>' into single '>'
+
+    for pattern in marketing_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Remove quoted replies (lines starting with >)
+    text = re.sub(r'^>.*$', '', text, flags=re.MULTILINE)
+
+    # Remove email signatures (anything after common signature markers)
+    text = re.sub(r'\n--\s*\n.*', '', text, flags=re.DOTALL)
+    text = re.sub(r'\nBest regards,.*', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\nThanks,.*', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\nSincerely,.*', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\nCheers,.*', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove lines that are just repeated characters (decorative separators)
+    text = re.sub(r'^(.)\1{3,}$', '', text, flags=re.MULTILINE)
+
+    # Remove lines with just symbols/punctuation
+    text = re.sub(r'^[\*\-\=\#\~\|\>\<\+\_\•\◦\▪\▫\→\←\↑\↓\/\\\[\]\{\}\(\)]+\s*$', '', text, flags=re.MULTILINE)
+
+    # Remove social media handles/links
+    text = re.sub(r'@\w+', '', text)
+    text = re.sub(r'#\w+', '', text)
+
+    # Remove "Presented by" and sponsor sections
+    text = re.sub(r'Presented by.*?\n', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'Sponsored by.*?\n', '', text, flags=re.IGNORECASE)
+
+    # Clean up whitespace aggressively
+    text = re.sub(r' +', ' ', text)  # Multiple spaces to single
+    text = re.sub(r'\n\s*\n+', '\n', text)  # All multiple newlines to single
+    text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)  # Trim lines
+
+    # Remove very short lines (likely fragments/formatting)
     lines = text.split('\n')
-    cleaned_lines = []
+    meaningful_lines = []
+
     for line in lines:
-        # If line starts with multiple '>', reduce to single '>'
-        if line.strip().startswith('>'):
-            # Remove extra spaces around '>' symbols
-            line = re.sub(r'\s*>\s*>\s*', '> ', line)
-            # Ensure only one '>' at start with one space after
-            line = re.sub(r'^\s*>+\s*', '> ', line)
-        cleaned_lines.append(line)
-    
-    text = '\n'.join(cleaned_lines)
-    
-    # Clean up any remaining multiple blank lines
-    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-    
-    return text.strip()
+        stripped = line.strip()
+        # Only keep lines with meaningful content
+        # Must have at least 10 characters and contain actual words
+        if len(stripped) >= 10 and sum(c.isalpha() for c in stripped) >= 5:
+            meaningful_lines.append(stripped)
+
+    text = ' '.join(meaningful_lines)  # Join with spaces instead of newlines
+
+    # Final aggressive truncation - only keep first N characters
+    if len(text) > MAX_CONTENT_LENGTH:
+        # Try to cut at a sentence boundary
+        truncated = text[:MAX_CONTENT_LENGTH]
+        last_period = truncated.rfind('.')
+        last_space = truncated.rfind(' ')
+
+        if last_period > MAX_CONTENT_LENGTH * 0.7:  # If period is reasonably close to end
+            text = truncated[:last_period + 1]
+        elif last_space > MAX_CONTENT_LENGTH * 0.8:  # Otherwise cut at word boundary
+            text = truncated[:last_space]
+        else:
+            text = truncated
+
+        text += '...'
+
+    # Final whitespace cleanup
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text
 
 def create_labels_if_needed(service):
     """Creates our classification labels if they don't exist."""
@@ -235,10 +387,10 @@ def read_emails_in_date_range():
     """Reads and processes emails from Nov 1 2023 to present."""
     service = get_gmail_service()
     
-    # Create labels if they don't exist
+    # Create labels if they don't exist1
     create_labels_if_needed(service)
     
-    start_date = (datetime.now() - timedelta(days=14)).strftime('%Y/%m/%d')
+    start_date = (datetime.now() - timedelta(days=20)).strftime('%Y/%m/%d')
     query = f'in:inbox -in:spam after:{start_date}'
     
     try:
@@ -287,26 +439,23 @@ def read_emails_in_date_range():
                 print(f"Skipping message - already has a classification label")
                 continue
             
-            # Process headers and content as before
+            # Process headers and content
             headers = msg['payload']['headers']
             subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
             sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'No Sender')
             email_date = next((header['value'] for header in headers if header['name'].lower() == 'date'), 'No Date')
-            
-            if 'parts' in msg['payload']:
-                parts = msg['payload']['parts']
-                data = parts[0]['body'].get('data', '')
-            else:
-                data = msg['payload']['body'].get('data', '')
-                
-            if data:
-                text = base64.urlsafe_b64decode(data).decode('utf-8')
-                text = clean_email_content(text)
-            else:
-                text = 'No content'
-            
+
+            # Skip emails from support@luma.com
+            if 'support@luma.com' in sender.lower():
+                print(f"Skipping email from support@luma.com")
+                continue
+
+            # Extract email body using extreme cleaning
+            text = get_email_body(msg['payload'])
+
             token_count = count_tokens(text)
-            print(f'Token count: {token_count}')
+            char_count = len(text)
+            print(f'Token count: {token_count} | Chars: {char_count}')
             
             classification = classify_email(sender, subject, text, email_date)
             
@@ -316,7 +465,7 @@ def read_emails_in_date_range():
             print(f'From: {sender}')
             print(f'Subject: {subject}')
             print('Content:')
-            print(text[:300] + '...' if len(text) > 300 else text)
+            print(text)
             print('\nClassification:')
             print(f"Type: {classification['classification']}")
             print(f"Reason: {classification['reason']}")
@@ -355,26 +504,17 @@ def test_specific_email():
             subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
             sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'No Sender')
             email_date = next((header['value'] for header in headers if header['name'].lower() == 'date'), 'No Date')
-            
-            if 'parts' in msg['payload']:
-                parts = msg['payload']['parts']
-                data = parts[0]['body'].get('data', '')
-            else:
-                data = msg['payload']['body'].get('data', '')
-                
-            if data:
-                text = base64.urlsafe_b64decode(data).decode('utf-8')
-                text = clean_email_content(text)
-            else:
-                text = 'No content'
-            
+
+            # Extract email body using extreme cleaning
+            text = get_email_body(msg['payload'])
+
             # Get classification from GPT
             classification = classify_email(sender, subject, text, email_date)
-            
+
             print(f'Date: {email_date}')
             print(f'Subject: {subject}')
             print('Content:')
-            print(text[:300] + '...' if len(text) > 300 else text)
+            print(text)
             print('\nClassification:')
             print(f"Type: {classification['classification']}")
             print(f"Reason: {classification['reason']}")

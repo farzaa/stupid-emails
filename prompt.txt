@@ -3,15 +3,18 @@ Please classify this email as either:
 ATTN: emails that are clearly from a real person that wanted to reach out to me for a specific reason. you can also place high value notifcations here/ time sensitive. 
 FK-U: a special place in hell is for these people. people trying to sell me stuff via their annoying email funnel or scam/phish me (ex. "what's your phone number")
 MARKETING: classic marketing emails from companies. safe to ignore type stuff. stuff like ny times/bloomberg type stuff fits in here.
-TAKE-A-LOOK: notification style emails that i should look at quickly ex flight updates, bank updats, bills, etc.
+TAKE-A-LOOK: notification style emails that i should look at quickly ex flight updates, bank updats, bills, etc. not social media.
 HMMMM: if you really aren't sure where to put it. dont put newsletter from builder type individuals in here, i prefer them in attn.
-
+ATTN-COFOUNDER: emails specfically from people who are interested in being my cofounder or working together. i recently wrote a blog post on human capital/future of education tech and am getting a lot of such inbound.
 
 My basic bio:
-- [enter your name and 3-4 lines about yourself here]
+- My name is Farza. My bio: I'm just a guy who loves creating things for others. I started my first company at 13 selling Dragon Ball Z: Tenkaichi Budokai 2 on eBay, grew it to $100K/year in high school, and have been building ever since. Most recently, I founded Buildspace—once the world’s largest school for people working on their own ideas, from YouTube channels to EDM to startups. Over five years, we scaled Nights & Weekends to 100,000+ students, raised from a16z/YC, built a physical SF campus, launched an AI social product, and reached millions with our content—before I eventually shut it down (here’s the letter I wrote). Before that, I founded ZipSchool (150K+ homeschool kids), built Visor (a real-time CV coach for Overwatch that Blizzard banned), was CTO at Kanga (rec systems for gamers), trained deep learning models for esports, built League tools used by millions, a failed AR menu app, and lots of random fun stuff. Some of it worked, most didn’t—but I learned a lot. Sometimes I write about the chaos of it all—wins and failures.
 
 Some context on my preferences:
 - i dont care for news type emails/world updates.
+- Stuff related to tidbit is always high pri.
+- started making yt videos and an app called freewrite.
+- a lot of people email to work with me, def mark them especially if they seem like an individual reaching out vs an agency.
 - i sometimes get investor updates/newsletters where people update me on their progress/life i like this deserves ATTN.
 - i get a lot of random builders/founders hit me up. i love that! but hate when its obviously no a personalized email to me. if unsure drop in HMMMM. its okay if these emails are 90+ days old. its better to reply to them vs not reply.
 - i like to read breif emails on an ai/ tech companies latest feature (ex. new drop from openai), while these are marketing, i'd like them in TAKE-A-LOOK. but, if this type of email is 14+ days old just put it in MARKETING.
@@ -24,4 +27,4 @@ Content: {content}
 Date Sent: {email_date}
 
 Provide your classification and a brief explanation why in JSON format:
-{{"classification": "ATTN/FK-U/MARKETING/TAKE-A-LOOK/HMMMM", "reason": "your explanation here"}} 
+{{"classification": "ATTN/FK-U/MARKETING/TAKE-A-LOOK/HMMMM/ATTN-COFOUNDER", "reason": "your explanation here"}} 

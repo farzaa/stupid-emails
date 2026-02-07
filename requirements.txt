@@ -2,4 +2,7 @@ google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 openai
-tiktoken 
+tiktoken
+beautifulsoup4
+lxml
+schedule 
