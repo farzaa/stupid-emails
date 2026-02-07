@@ -80,24 +80,47 @@ def classify_email(sender, subject, content, email_date):
 def get_gmail_service():
     """Gets or creates Gmail API service."""
     creds = None
-    
-    # The file token.pickle stores the user's access and refresh tokens
-    if os.path.exists('token.pickle'):
+
+    # Try to load credentials from environment variable (Railway/production)
+    token_base64 = os.environ.get('GMAIL_TOKEN_PICKLE')
+    credentials_base64 = os.environ.get('GMAIL_CREDENTIALS_JSON')
+
+    if token_base64:
+        # Decode base64 token.pickle from environment
+        try:
+            token_data = base64.b64decode(token_base64)
+            creds = pickle.loads(token_data)
+        except Exception as e:
+            print(f"Error loading credentials from environment: {e}")
+            creds = None
+    elif os.path.exists('token.pickle'):
+        # Fallback to local file for development
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
-    
+
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
+            # For credentials.json, check environment variable first
+            if credentials_base64:
+                credentials_data = base64.b64decode(credentials_base64)
+                credentials_info = json.loads(credentials_data)
+                flow = InstalledAppFlow.from_client_config(
+                    credentials_info, SCOPES)
+            elif os.path.exists('credentials.json'):
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    'credentials.json', SCOPES)
+            else:
+                raise FileNotFoundError("Neither GMAIL_CREDENTIALS_JSON environment variable nor credentials.json file found.")
+
             creds = flow.run_local_server(port=0)
-        
-        # Save the credentials for the next run
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
+
+        # Save the credentials for the next run (only works locally)
+        if not token_base64:  # Only save if not running from env vars
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
 
     return build('gmail', 'v1', credentials=creds)
 
